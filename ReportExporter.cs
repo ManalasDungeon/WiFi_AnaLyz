@@ -294,6 +294,12 @@ namespace WifiAnalyzerPro
             sb.AppendLine("    <div id='honeypot-list' class='sec-list'></div>");
             sb.AppendLine("  </div>");
 
+            sb.AppendLine("  <div class='card sec-card' id='ti-card'>");
+            sb.AppendLine("    <h2>Uhkatiedustelu <span id='ti-badge' class='sec-badge'></span></h2>");
+            sb.AppendLine("    <div id='ti-status' class='muted small' style='margin-bottom:5px'></div>");
+            sb.AppendLine("    <div id='ti-list' class='sec-list'></div>");
+            sb.AppendLine("  </div>");
+
             sb.AppendLine("</section>");
 
             sb.AppendLine("<div id='toasts'></div>");
@@ -911,6 +917,7 @@ function updateForensicPanels(d){
   renderRouterPanel(d.RouterBlockLog||[]);
   renderEapolPanel(d.EapolSummary||[], d.EapolStatus||'');
   renderHoneypotPanel(d.HoneypotEvents||[]);
+  renderTiPanel(d.ThreatIntelStatus||'', d.ThreatIntelHits||[]);
 }
 
 // ── PCAP: vilkkuva piste + tiedostolista ──────────────────────
@@ -992,6 +999,30 @@ function renderHoneypotPanel(events){
       '<span class=""sec-lbl"">'+enc(e.Kind||'Probe')+'</span>'+
       '<span class=""sec-detail"">'+enc(e.SourceMac||'?')+
       ' &rarr; '+enc(e.TargetSsid||'?')+'</span></div>';
+  }).join('');
+}
+
+function renderTiPanel(status, hits){
+  var badge=ge('ti-badge'); var list=ge('ti-list'); var st=ge('ti-status');
+  if(st)st.textContent=status||'';
+  var threats=hits.filter(function(h){return h.Item2!=='Clean';});
+  if(badge){
+    badge.textContent=threats.length||'';
+    badge.className='sec-badge '+(threats.length>0?'error':'');
+  }
+  if(!list)return;
+  if(!threats.length){
+    list.innerHTML='<div class=""sec-row muted"">Ei uhkia havaittu</div>';
+    return;
+  }
+  list.innerHTML=threats.slice(0,12).map(function(h){
+    var cls=h.Item2==='Malicious'?'ti-malicious':'ti-suspicious';
+    var t=new Date(h.Item4).toLocaleTimeString('fi-FI');
+    return '<div class=""sec-row '+cls+'"">'+
+      '<span class=""sec-ts"">'+t+'</span>'+
+      '<span class=""sec-lbl"">'+enc(h.Item2)+'</span>'+
+      '<span class=""sec-detail"">'+enc(h.Item1)+
+      ' <span class=""muted"">via '+enc(h.Item3)+'</span></span></div>';
   }).join('');
 }
 

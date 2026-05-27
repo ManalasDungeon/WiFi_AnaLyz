@@ -134,8 +134,27 @@ namespace WifiAnalyzerPro
                 engine.AttachPassiveScannerEvents(passiveScanner);
 
                 // Inkrementaaliset DPI-tapahtumat menevät suoraan SSE-kanavalle
-                // ilman täyttä snapshot-kierrosta — matala viive, ei blokaa moottoria
                 engine.DpiEventOccurred += obs => webDashboard?.PushDpiEvent(obs);
+
+                // Honeypot-havainnot → loki + (hälytys menee enginessä _alertDispatcher:lle)
+                engine.HoneypotEventOccurred += evt =>
+                    AppLogger.Log($"[Honeypot] {evt.Kind}: {evt.SourceMac} → {evt.TargetSsid} ({evt.Detail})");
+
+                // Behavioral IDS -anomaliat → loki
+                engine.AnomalyDetected += a =>
+                    AppLogger.Log($"[BID] {a.Rule} {a.MacAddress} score={a.Score}: {a.Detail}");
+
+                // SoftAP-haamutukiasema käynnistetään jos konfiguroitu
+                if (cfg.EnableHoneypotSoftAp)
+                {
+                    string softApSsid = string.IsNullOrWhiteSpace(cfg.HoneypotSoftApSsid)
+                        ? null : cfg.HoneypotSoftApSsid;
+                    bool started = engine.StartHoneypotSoftAp(softApSsid);
+                    AppLogger.Log(started
+                        ? $"[Honeypot] SoftAP käynnistyi: {softApSsid ?? "Free_Public_WiFi"}"
+                        : "[Honeypot] SoftAP käynnistys epäonnistui (vaatii Admin-oikeudet)");
+                }
+
                 engine.AttachPacketProcessor((data, ts) => passiveScanner.ProcessPacket(data, ts));
 
                 Console.Clear();
@@ -381,14 +400,29 @@ namespace WifiAnalyzerPro
                                     int dr = rowChart + ch.Length + 1;
                                     var dl = deviceScanner.GetDevices();
                                     WriteAt(0, dr++, dl.Count > 0
-                                        ? $"  Havaitut laitteet ({dl.Count}):"
+                                        ? $"  Havaitut laitteet ({dl.Count}) — [D] päivittää:"
                                         : "  Verkkolaitteet: [D] käynnistää ARP-skannauksen");
-                                    foreach (var d in dl.Take(5))
-                                        WriteAt(0, dr++, string.Format("    {0,-16} {1,-18} {2,-14} [{3}]",
-                                            d.IpAddress,
-                                            d.Hostname?.Length > 17 ? d.Hostname.Substring(0, 16) + "…" : (d.Hostname ?? "--"),
-                                            d.Vendor?.Length > 13  ? d.Vendor.Substring(0, 12) + "…"  : (d.Vendor ?? ""),
-                                            d.Source));
+
+                                    // 2 riviä per laite: IP + MAC, sitten hostname + vendor
+                                    int maxDev = Math.Min(dl.Count, 8);
+                                    foreach (var d in dl.Take(maxDev))
+                                    {
+                                        string ip  = d.IpAddress ?? "?";
+                                        string mac = string.IsNullOrEmpty(d.MacAddress) ||
+                                                     d.MacAddress == "??:??:??:??:??:??"
+                                                     ? "—" : d.MacAddress.ToUpperInvariant();
+                                        WriteAt(0, dr++, $"    {ip,-16} {mac,-19} [{d.Source ?? ""}]");
+
+                                        string host   = string.IsNullOrEmpty(d.Hostname) ? "--" : d.Hostname;
+                                        string vendor = string.IsNullOrEmpty(d.Vendor)   ? ""  : d.Vendor;
+                                        string detail = vendor.Length > 0
+                                            ? $"    ↳ {host} | {vendor}"
+                                            : $"    ↳ {host}";
+                                        WriteAt(0, dr++, detail);
+                                    }
+                                    // Tyhjennä jäljelle jääneet rivit
+                                    int drEnd = rowChart + ch.Length + 1 + 1 + maxDev * 2 + 2;
+                                    while (dr < drEnd) WriteAt(0, dr++, "");
                                 }
                             }
                         }

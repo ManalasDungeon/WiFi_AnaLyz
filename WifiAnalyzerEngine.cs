@@ -177,6 +177,9 @@ namespace WifiAnalyzerPro
                         _alertDispatcher?.SendAsync("ThreatIntel", obs.Name, detail, sev);
                         if (sev == 3 && !string.IsNullOrEmpty(obs.SourceMac))
                             _routerContainment?.BlockMac(obs.SourceMac, $"ThreatIntel: {obs.Name}");
+                        // Tallenna osuma dashboardin TI-paneelille
+                        _tiHits.Enqueue((obs.Name, tiResult.Level.ToString(), tiResult.Source, DateTime.Now));
+                        while (_tiHits.Count > 50) _tiHits.TryDequeue(out _);
                         AppLogger.Log($"[TI] Hälytys: {obs.Name} ({tiResult.Level}) via {obs.SourceMac}");
                     });
             };
@@ -801,6 +804,12 @@ namespace WifiAnalyzerPro
                 string bssid = kv.Key;
                 var    snap  = kv.Value;
                 long   bytes = _trafficByBssid.TryGetValue(bssid, out var b) ? b : 0;
+
+                // KORJAUS 1: Syötä liikennebytejä BehaviorProfilerille.
+                // Ilman tätä HourlyBytes[h] pysyy aina nollana → TRAFFIC_SPIKE ja
+                // DATA_EXFIL -säännöt eivät voi koskaan laueta.
+                if (bytes > 0)
+                    _behavior?.RecordTraffic(bssid, _oui.Lookup(bssid) ?? "", bytes);
                 double base_ = (100 + snap.Rssi) + (Math.Log10(bytes + 1) * 5.0);
                 int    ch    = snap.Channel;
 
@@ -841,6 +850,7 @@ namespace WifiAnalyzerPro
                     Score = score,
                     Grade = ChannelAnalyzer.RssiToGrade(snap.Rssi),
                     ChannelUtilization = _channelLoad.GetUtilization(bssid),
+                    StationCount       = _channelLoad.GetStationCount(bssid),
                     // ── Kyvykkyystiedot passiivisesta skannauksesta ──
                     PhyGeneration   = passiveInfo?.PhyGeneration,
                     MaxDataRateMbps = passiveInfo?.MaxDataRateMbps,
@@ -1100,11 +1110,23 @@ namespace WifiAnalyzerPro
                 RouterBlockLog    = (_routerContainment?.GetBlockLog() ?? new System.Collections.Generic.List<string>())
                                      .AsEnumerable().Reverse().Take(20).ToList(),
                 EapolSummary      = _eapolTracker.GetSummary(),
-                HoneypotEvents    = _honeypot?.GetRecentEvents(20) ?? new System.Collections.Generic.List<HoneypotEvent>()
+                HoneypotEvents    = _honeypot?.GetRecentEvents(20) ?? new System.Collections.Generic.List<HoneypotEvent>(),
+                ThreatIntelStatus = _threatIntel?.Status ?? "TI: pois käytöstä",
+                ThreatIntelHits   = GetRecentThreatIntelHits()
             };
         }
 
         /// <summary>Listaa viimeisimmät PCAP-tiedostot tallennushakemistosta.</summary>
+        // TI-löydösten ring-queue dashboardille (max 50 viimeisintä)
+        private readonly System.Collections.Concurrent.ConcurrentQueue<(string Domain, string Level, string Source, DateTime Time)>
+            _tiHits = new();
+
+        private List<(string Domain, string Level, string Source, DateTime Time)> GetRecentThreatIntelHits()
+        {
+            var arr = _tiHits.ToArray();
+            return arr.Skip(Math.Max(0, arr.Length - 20)).ToList();
+        }
+
         private List<string> GetRecentPcapFiles(int max)
         {
             try

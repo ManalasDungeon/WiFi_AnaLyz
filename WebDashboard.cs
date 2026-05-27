@@ -480,5 +480,9 @@ td{{padding:5px 8px;border-bottom:1px solid #1a1a2e}}</style></head><body>
         public List<EapolTracker.EapolSummaryEntry> EapolSummary { get; set; }
         /// <summary>Honeypot-havainnot (Probe Request -ansa).</summary>
         public List<HoneypotEvent>       HoneypotEvents    { get; set; }
+        /// <summary>ThreatIntel-moottorin tilarivi (OTX/AbuseIPDB, tilastot).</summary>
+        public string                    ThreatIntelStatus { get; set; }
+        /// <summary>TI-löydökset: (Domain, ThreatLevel, Source) -tuplet.</summary>
+        public List<(string Domain, string Level, string Source, DateTime Time)> ThreatIntelHits { get; set; }
     }
 }
