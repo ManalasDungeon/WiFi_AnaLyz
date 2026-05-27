@@ -35,6 +35,22 @@ namespace WifiAnalyzerPro
 
         private readonly DpiAnalyzer _dpi;
 
+        // ── Captive portal -tunnistus ─────────────────────────────
+        // Seuraa per-BSSID: mihin IP-osoitteeseen DNS-kyselyt kohdistuvat.
+        // Jos yli CaptivePortalThresholdPct % kyselyistä menee samaan IP:hen → captive portal.
+        private readonly ConcurrentDictionary<string,
+            ConcurrentDictionary<string, int>> _dnsIpsByBssid =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, int> _dnsTotalByBssid =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, bool> _captivePortals =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Laukaistaan ensimmäistä kertaa kun captive portal tunnistetaan (bssid, dominantIp).</summary>
+        public event Action<string, string> CaptivePortalDetected;
+
+        public int CaptivePortalThresholdPct { get; set; } = 80;
+
         /// <summary>
         /// Tapahtuma joka laukaistaan kun uusi tai päivitetty DPI-havainto on valmis.
         /// Parametri on valmis TrafficObservation-olio kaikilla kentillä täytettynä.
@@ -235,6 +251,11 @@ namespace WifiAnalyzerPro
         {
             if (string.IsNullOrWhiteSpace(hostname)) return;
             RecordObservation(hostname, "DNS", srcMac, bssid);
+
+            // Captive portal: seuraa mihin IP:hen DNS-kyselyt kohdistuvat per AP
+            // Käytännössä kaikki captive portal -verkot ohjaavat DNS:n samaan IP:hen
+            if (!string.IsNullOrEmpty(bssid))
+                TrackCaptivePortalDns(bssid, hostname);
         }
 
         public void RecordTlsSni(string sni, string srcMac = null, string bssid = null)
@@ -314,6 +335,60 @@ namespace WifiAnalyzerPro
         {
             lock (_lock) { _byChannel.Clear(); }
             _observations.Clear();
+        }
+
+        // ── Captive portal -logiikka ──────────────────────────────
+
+        private void TrackCaptivePortalDns(string bssid, string hostname)
+        {
+            // Käytetään hostnamea "IP-proxynä" — captive portal vastaa kaikille
+            // DNS-kyselyille samalla IP:llä, mikä näkyy epänormaalina jakaumana.
+            // Yksinkertaistus: jos sama hostname esiintyy >80% kaikista kyselyistä,
+            // se on todennäköisesti captive portal -ohjaussivu.
+            var ipMap = _dnsIpsByBssid.GetOrAdd(bssid,
+                _ => new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase));
+
+            ipMap.AddOrUpdate(hostname, 1, (_, c) => c + 1);
+            int total = _dnsTotalByBssid.AddOrUpdate(bssid, 1, (_, c) => c + 1);
+
+            // Tarkista vasta kun riittävästi dataa (min 10 kyselyä)
+            if (total < 10) return;
+
+            string dominant = null;
+            int    domCount = 0;
+            foreach (var kv in ipMap)
+                if (kv.Value > domCount) { domCount = kv.Value; dominant = kv.Key; }
+
+            if (dominant == null) return;
+            int pct = domCount * 100 / total;
+            if (pct >= CaptivePortalThresholdPct)
+            {
+                // Hälytä vain kerran per BSSID
+                if (_captivePortals.TryAdd(bssid, true))
+                {
+                    AppLogger.Log($"[CaptivePortal] BSSID {bssid}: {pct}% DNS-kyselyistä → {dominant} ({total} kyselyä)");
+                    CaptivePortalDetected?.Invoke(bssid, dominant);
+                }
+            }
+        }
+
+        public bool IsCaptivePortal(string bssid)
+            => _captivePortals.ContainsKey(bssid);
+
+        public List<(string Bssid, string DominantTarget, int Pct)> GetCaptivePortals()
+        {
+            var result = new List<(string, string, int)>();
+            foreach (var bssid in _captivePortals.Keys)
+            {
+                if (!_dnsIpsByBssid.TryGetValue(bssid, out var ipMap)) continue;
+                if (!_dnsTotalByBssid.TryGetValue(bssid, out int total) || total == 0) continue;
+                string dom = null; int domC = 0;
+                foreach (var kv in ipMap)
+                    if (kv.Value > domC) { domC = kv.Value; dom = kv.Key; }
+                if (dom != null)
+                    result.Add((bssid, dom, domC * 100 / total));
+            }
+            return result;
         }
     }
 }

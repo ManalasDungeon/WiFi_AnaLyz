@@ -33,6 +33,16 @@ namespace WifiAnalyzerPro
         private int    _severityThreshold;
         private int    _cooldownMinutes;
 
+        // SMTP-kentät
+        private string _smtpHost     = "";
+        private int    _smtpPort     = 587;
+        private string _smtpUser     = "";
+        private string _smtpPassword = "";
+        private string _smtpFrom     = "";
+        private string _smtpTo       = "";
+        private int    _smtpSevThreshold = 3;
+        private bool   _smtpUseSsl   = true;
+
         // Cooldown: avain = "tyyppi:domain" → viimeisin lähetysaika
         private readonly ConcurrentDictionary<string, DateTime> _lastSent =
             new(StringComparer.OrdinalIgnoreCase);
@@ -46,6 +56,14 @@ namespace WifiAnalyzerPro
             _genericUrl         = cfg.AlertWebhookUrl    ?? "";
             _severityThreshold  = cfg.BlacklistAlertSeverityThreshold;
             _cooldownMinutes    = cfg.SecurityAlertCooldownMinutes;
+            _smtpHost           = cfg.SmtpHost           ?? "";
+            _smtpPort           = cfg.SmtpPort;
+            _smtpUser           = cfg.SmtpUser           ?? "";
+            _smtpPassword       = cfg.SmtpPassword       ?? "";
+            _smtpFrom           = cfg.SmtpFrom           ?? "wifianalyzer@localhost";
+            _smtpTo             = cfg.SmtpTo             ?? "";
+            _smtpSevThreshold   = cfg.SmtpAlertSeverityThreshold;
+            _smtpUseSsl         = cfg.SmtpUseSsl;
         }
 
         /// <summary>
@@ -93,6 +111,11 @@ namespace WifiAnalyzerPro
 
             if (!string.IsNullOrWhiteSpace(_genericUrl))
                 tasks.Add(SendGenericAsync(_genericUrl, type, subject, detail, severity, ts));
+
+            if (!string.IsNullOrWhiteSpace(_smtpHost) &&
+                !string.IsNullOrWhiteSpace(_smtpTo) &&
+                severity >= _smtpSevThreshold)
+                tasks.Add(SendEmailAsync(type, subject, detail, sev, emoji, ts, severity));
 
             foreach (var t in tasks)
                 try { await t.ConfigureAwait(false); }
@@ -206,6 +229,54 @@ namespace WifiAnalyzerPro
             using var resp = await _http.PostAsync(url, content).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
                 AppLogger.Log($"[Webhook] HTTP {(int)resp.StatusCode}");
+        }
+
+        // ── Sähköposti (SMTP) ──────────────────────────────────────
+
+        private async Task SendEmailAsync(
+            string type, string subject, string detail,
+            string sev, string emoji, string ts, int severity)
+        {
+            try
+            {
+                string body =
+                    $"<html><body style='font-family:sans-serif;background:#0f1117;color:#e2e8f0;padding:20px'>" +
+                    $"<h2 style='color:{(severity >= 3 ? "#ef4444" : severity >= 2 ? "#f97316" : "#ecc94b")}'>" +
+                    $"{emoji} {sev}: {System.Net.WebUtility.HtmlEncode(type)}</h2>" +
+                    $"<table style='border-collapse:collapse;width:100%'>" +
+                    $"<tr><td style='padding:6px;color:#94a3b8;width:120px'>Kohde</td>" +
+                    $"<td style='padding:6px'><code>{System.Net.WebUtility.HtmlEncode(subject)}</code></td></tr>" +
+                    $"<tr><td style='padding:6px;color:#94a3b8'>Selitys</td>" +
+                    $"<td style='padding:6px'>{System.Net.WebUtility.HtmlEncode(detail)}</td></tr>" +
+                    $"<tr><td style='padding:6px;color:#94a3b8'>Vakavuus</td>" +
+                    $"<td style='padding:6px'>{severity}/3</td></tr>" +
+                    $"<tr><td style='padding:6px;color:#94a3b8'>Aika</td>" +
+                    $"<td style='padding:6px'>{ts}</td></tr></table>" +
+                    $"<p style='color:#475569;font-size:12px;margin-top:20px'>WifiAnalyzerPro — Automaattinen hälytys</p>" +
+                    $"</body></html>";
+
+                using var msg = new System.Net.Mail.MailMessage();
+                msg.From    = new System.Net.Mail.MailAddress(_smtpFrom);
+                msg.Subject = $"[WifiAnalyzer] {emoji} {sev}: {type} — {subject}";
+                msg.Body    = body;
+                msg.IsBodyHtml = true;
+
+                foreach (var to in _smtpTo.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                    msg.To.Add(to.Trim());
+
+                using var client = new System.Net.Mail.SmtpClient(_smtpHost, _smtpPort)
+                {
+                    EnableSsl   = _smtpUseSsl,
+                    Credentials = string.IsNullOrEmpty(_smtpUser) ? null
+                        : new System.Net.NetworkCredential(_smtpUser, _smtpPassword),
+                    DeliveryMethod = System.Net.Mail.SmtpDeliveryMethod.Network,
+                    Timeout        = 8000,
+                };
+
+                await Task.Run(() => client.Send(msg)).ConfigureAwait(false);
+                AppLogger.Log($"[SMTP] Hälytys lähetetty: {type} / {subject} → {_smtpTo}");
+            }
+            catch (Exception ex) { AppLogger.Log($"[SMTP] Virhe: {ex.Message}"); }
         }
 
         public void Dispose() { }

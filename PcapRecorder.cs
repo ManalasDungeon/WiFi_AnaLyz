@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -206,6 +207,65 @@ namespace WifiAnalyzerPro
         }
 
         public int  ActiveCount => Interlocked.CompareExchange(ref _activeCount, 0, 0);
+
+        /// <summary>
+        /// Siivoa vanhentuneet PCAP-tiedostot hakemistosta.
+        /// Poistaa tiedostot jos:
+        ///   a) Tiedosto on vanhempi kuin retentionDays (0 = ei ikärajaa)
+        ///   b) Hakemiston kokonaiskoko ylittää maxSizeMb (0 = ei rajausta)
+        ///      → poistetaan vanhimmat ensin kunnes koko on rajan alla
+        /// </summary>
+        public static void CleanupDirectory(
+            string directory,
+            int retentionDays,
+            int maxSizeMb)
+        {
+            if (string.IsNullOrEmpty(directory) || !System.IO.Directory.Exists(directory))
+                return;
+
+            try
+            {
+                var files = System.IO.Directory.GetFiles(directory, "capture_*.pcap")
+                    .Select(f => new System.IO.FileInfo(f))
+                    .OrderBy(f => f.LastWriteTime)
+                    .ToList();
+
+                int deleted = 0;
+
+                // Poista liian vanhat tiedostot
+                if (retentionDays > 0)
+                {
+                    var cutoff = DateTime.Now.AddDays(-retentionDays);
+                    foreach (var f in files.Where(f => f.LastWriteTime < cutoff).ToList())
+                    {
+                        try { f.Delete(); files.Remove(f); deleted++; }
+                        catch (Exception ex) { AppLogger.Log($"[PCAP] Poisto: {ex.Message}"); }
+                    }
+                }
+
+                // Poista vanhimmat jos hakemisto liian suuri
+                if (maxSizeMb > 0)
+                {
+                    long maxBytes = (long)maxSizeMb * 1024 * 1024;
+                    long total    = files.Sum(f => f.Length);
+                    foreach (var f in files)
+                    {
+                        if (total <= maxBytes) break;
+                        try
+                        {
+                            total -= f.Length;
+                            f.Delete(); deleted++;
+                        }
+                        catch (Exception ex) { AppLogger.Log($"[PCAP] Poisto: {ex.Message}"); }
+                    }
+                }
+
+                if (deleted > 0)
+                    AppLogger.Log($"[PCAP] Siivottu {deleted} tiedostoa hakemistosta '{directory}'");
+            }
+            catch (Exception ex) { AppLogger.Log($"[PCAP] Cleanup: {ex.Message}"); }
+        }
+
         public void Dispose()   { }
     }
 }

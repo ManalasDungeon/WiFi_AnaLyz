@@ -484,5 +484,11 @@ td{{padding:5px 8px;border-bottom:1px solid #1a1a2e}}</style></head><body>
         public string                    ThreatIntelStatus { get; set; }
         /// <summary>TI-löydökset: (Domain, ThreatLevel, Source) -tuplet.</summary>
         public List<(string Domain, string Level, string Source, DateTime Time)> ThreatIntelHits { get; set; }
+        /// <summary>Mesh-verkkojen topologiaryhmät (≥2 AP sama SSID).</summary>
+        public List<MeshGroup>           MeshGroups      { get; set; }
+        /// <summary>Viimeisimmät roaming-tapahtumat.</summary>
+        public List<RoamingEvent>        RecentRoaming   { get; set; }
+        /// <summary>Captive portal -tunnistukset (bssid, dominantTarget, pct).</summary>
+        public List<(string Bssid, string DominantTarget, int Pct)> CaptivePortals { get; set; }
     }
 }
