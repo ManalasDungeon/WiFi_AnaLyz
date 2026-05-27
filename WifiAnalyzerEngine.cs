@@ -16,7 +16,7 @@ namespace WifiAnalyzerPro
         private static readonly JsonSerializerOptions JsonRead =
             new() { PropertyNameCaseInsensitive = true };
 
-        private readonly WifiConfig     _cfg;
+        private WifiConfig              _cfg;
         private readonly AlertManager   _alerts;
         private readonly ChannelAnalyzer _channels;
         private readonly OuiDatabase    _oui;
@@ -1378,6 +1378,14 @@ namespace WifiAnalyzerPro
         public void ApplyConfig(WifiConfig newCfg)
         {
             if (newCfg == null) return;
+
+            // KORJAUS 1: päivitä _cfg itse (ei enää readonly) jotta kaikki uudet kentät
+            // (ComplianceScheduleDay, CaptureRetentionDays, ChannelRecommendationThreshold jne.)
+            // saadaan hot-reloadin kautta ilman erillistä volatile-kenttää per arvo.
+            // Kirjoitetaan vain ApplyConfig:ssa (HotReload-säikeestä), luetaan päälangasta
+            // → WifiConfig on ei-mutatoitava arvo-olio → ei tarvita lukkoa.
+            _cfg = newCfg;
+
             _minScanInterval   = TimeSpan.FromSeconds(newCfg.MinScanIntervalSeconds);
             _bssStaleThreshold = TimeSpan.FromSeconds(newCfg.BssStaleThresholdSeconds);
             _staleApTtl        = TimeSpan.FromMinutes(newCfg.StaleApMinutes);
@@ -1388,10 +1396,16 @@ namespace WifiAnalyzerPro
             _alertDispatcher?.Apply(newCfg);
             _routerContainment?.Apply(newCfg);
             _threatIntel?.Apply(newCfg);
+
+            // KORJAUS 2: CaptivePortalThresholdPct päivitetään hot-reloadin yhteydessä
+            _hiddenNodeTracker.CaptivePortalThresholdPct = newCfg.CaptivePortalDnsThresholdPct;
+
             AppLogger.Log($"[HotReload] RssiAlert={newCfg.RssiAlertThreshold} dBm, " +
                           $"ScanInterval={newCfg.MinScanIntervalSeconds} s, " +
+                          $"Compliance={newCfg.ComplianceScheduleDay}, " +
+                          $"ChannelRec={newCfg.ChannelRecommendationThreshold:F0}, " +
                           $"TI={(newCfg.EnableThreatIntel ? "on" : "off")}, " +
-                          $"Discord={(string.IsNullOrEmpty(newCfg.DiscordWebhookUrl) ? "off" : "on")}");
+                          $"SMTP={(string.IsNullOrEmpty(newCfg.SmtpHost) ? "off" : "on")}");
         }
         public void RequestStop() { try { _cts.Cancel(); } catch (Exception ex) { AppLogger.Log($"[Engine] ReqStop: {ex.Message}"); } }
 

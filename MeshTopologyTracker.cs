@@ -100,7 +100,19 @@ namespace WifiAnalyzerPro
 
                 group.IsMesh    = apList.Count >= 2;
                 group.UpdatedAt = DateTime.Now;
-                group.Nodes     = apList.Select(a => new MeshNode
+
+                // KORJAUS 4: lasketaan roaming-kerrat etukäteen Dictionary:iin
+                // Aiemmin CountRoamsTo() skannasi koko _history-jonon jokaiselle AP:lle
+                // → O(n × |history|) per iteraatio. Nyt O(|history|) kerran per päivitys.
+                var roamCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var ev in _history)
+                {
+                    if (ev.ToBssid == null) continue;
+                    roamCounts.TryGetValue(ev.ToBssid, out int c);
+                    roamCounts[ev.ToBssid] = c + 1;
+                }
+
+                group.Nodes = apList.Select(a => new MeshNode
                 {
                     Bssid       = a.Bssid,
                     Vendor      = a.Vendor ?? oui?.Lookup(a.Bssid) ?? "",
@@ -109,7 +121,7 @@ namespace WifiAnalyzerPro
                     Band        = a.Band ?? "",
                     IsConnected = string.Equals(a.Bssid, connectedBssid,
                                       StringComparison.OrdinalIgnoreCase),
-                    RoamCount   = CountRoamsTo(a.Bssid),
+                    RoamCount   = roamCounts.TryGetValue(a.Bssid, out int rc) ? rc : 0,
                 }).ToList();
             }
 
@@ -182,9 +194,6 @@ namespace WifiAnalyzerPro
             link.Count++;
             link.LastAt = DateTime.Now;
         }
-
-        private int CountRoamsTo(string bssid)
-            => _history.Count(r => r.ToBssid == bssid);
 
         // ── Julkinen lukurajapinta ─────────────────────────────────
 

@@ -119,12 +119,13 @@ namespace WifiAnalyzerPro
                     break;
 
                 case 4:  // Probe Request — laite etsii tiettyä SSID:tä
-                    if (ProbeRequestDetected != null && off + 24 < data.Length)
+                    if (off + 24 < data.Length)
                     {
                         string srcMac = FormatMac(data, off + 10);
                         string probed = ParseProbeRequestSsid(data, off + 24);
+                        // ?.Invoke on atomiinen: ei race conditionia null-checkin ja kutsun välillä
                         if (!string.IsNullOrEmpty(probed))
-                            ProbeRequestDetected.Invoke(srcMac, probed, data, off);
+                            ProbeRequestDetected?.Invoke(srcMac, probed, data, off);
                     }
                     break;
 
