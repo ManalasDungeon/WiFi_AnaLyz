@@ -44,6 +44,8 @@ namespace WifiAnalyzerPro
 
         /// <summary>Kanavan käyttöaste (0..100 %), BSS Load IE 11. null = ei saatavilla.</summary>
         public int? ChannelUtilization { get; set; }
+        /// <summary>Yhdistettyjen asemien määrä, BSS Load IE 11. null = ei saatavilla.</summary>
+        public int? StationCount       { get; set; }
 
         // ── Kyvykkyystiedot (passiivinen skannaus) ────────────────
         /// <summary>Wi-Fi-sukupolvi: "Wi-Fi 4", "Wi-Fi 5", "Wi-Fi 6", "Wi-Fi 6E", "Wi-Fi 7".</summary>

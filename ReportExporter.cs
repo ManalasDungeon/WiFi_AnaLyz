@@ -60,7 +60,14 @@ namespace WifiAnalyzerPro
             SaveHtml(aps, alerts, now, dir, bestChannel2G);
             WriteRecommendationIfNeeded(aps, bestChannel2G, dir);
 
-            return $"✓ Viety: {Path.GetFileName(stamped)}, wifi_data.csv, wifi_report.html";
+            if (_cfg.EnablePrometheusExport)
+            {
+                ExportPrometheusAlertRules(dir);
+                ExportGrafanaDashboard(dir);
+            }
+
+            return $"✓ Viety: {Path.GetFileName(stamped)}, wifi_data.csv, wifi_report.html" +
+                   (_cfg.EnablePrometheusExport ? ", alert_rules.yml, grafana_dashboard.json" : "");
         }
 
         // ── CSV ───────────────────────────────────────────────────
@@ -292,6 +299,12 @@ namespace WifiAnalyzerPro
             sb.AppendLine("    <h2>Honeypot-ansa <span id='honeypot-badge' class='sec-badge error'></span></h2>");
             sb.AppendLine("    <div class='muted small' style='margin-bottom:5px'>Probe Request &rarr; decoy-SSID</div>");
             sb.AppendLine("    <div id='honeypot-list' class='sec-list'></div>");
+            sb.AppendLine("  </div>");
+
+            sb.AppendLine("  <div class='card sec-card' id='ti-card'>");
+            sb.AppendLine("    <h2>Uhkatiedustelu <span id='ti-badge' class='sec-badge'></span></h2>");
+            sb.AppendLine("    <div id='ti-status' class='muted small' style='margin-bottom:5px'></div>");
+            sb.AppendLine("    <div id='ti-list' class='sec-list'></div>");
             sb.AppendLine("  </div>");
 
             sb.AppendLine("</section>");
@@ -911,6 +924,7 @@ function updateForensicPanels(d){
   renderRouterPanel(d.RouterBlockLog||[]);
   renderEapolPanel(d.EapolSummary||[], d.EapolStatus||'');
   renderHoneypotPanel(d.HoneypotEvents||[]);
+  renderTiPanel(d.ThreatIntelStatus||'', d.ThreatIntelHits||[]);
 }
 
 // ── PCAP: vilkkuva piste + tiedostolista ──────────────────────
@@ -992,6 +1006,30 @@ function renderHoneypotPanel(events){
       '<span class=""sec-lbl"">'+enc(e.Kind||'Probe')+'</span>'+
       '<span class=""sec-detail"">'+enc(e.SourceMac||'?')+
       ' &rarr; '+enc(e.TargetSsid||'?')+'</span></div>';
+  }).join('');
+}
+
+function renderTiPanel(status, hits){
+  var badge=ge('ti-badge'); var list=ge('ti-list'); var st=ge('ti-status');
+  if(st)st.textContent=status||'';
+  var threats=hits.filter(function(h){return h.Item2!=='Clean';});
+  if(badge){
+    badge.textContent=threats.length||'';
+    badge.className='sec-badge '+(threats.length>0?'error':'');
+  }
+  if(!list)return;
+  if(!threats.length){
+    list.innerHTML='<div class=""sec-row muted"">Ei uhkia havaittu</div>';
+    return;
+  }
+  list.innerHTML=threats.slice(0,12).map(function(h){
+    var cls=h.Item2==='Malicious'?'ti-malicious':'ti-suspicious';
+    var t=new Date(h.Item4).toLocaleTimeString('fi-FI');
+    return '<div class=""sec-row '+cls+'"">'+
+      '<span class=""sec-ts"">'+t+'</span>'+
+      '<span class=""sec-lbl"">'+enc(h.Item2)+'</span>'+
+      '<span class=""sec-detail"">'+enc(h.Item1)+
+      ' <span class=""muted"">via '+enc(h.Item3)+'</span></span></div>';
   }).join('');
 }
 
@@ -1178,6 +1216,158 @@ else{setConn('offline');ge('conn-label').textContent='Staattinen tiedosto';}
 
         private static string EscPromLabel(string s)
             => (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+
+        // ── Prometheus alert_rules.yml ────────────────────────────
+
+        private void ExportPrometheusAlertRules(string dir)
+        {
+            string yaml =
+@"# WifiAnalyzerPro — Prometheus Alerting Rules
+# Kopioi tämä tiedosto Prometheuksen rules-hakemistoon ja lisää
+# prometheus.yml:ään: rule_files: ['alert_rules.yml']
+groups:
+  - name: wifi_security
+    interval: 30s
+    rules:
+
+      - alert: WifiDeauthStorm
+        expr: wifi_deauth_count_total > 10
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: ""Deauth-myrsky havaittu""
+          description: ""{{ $labels.bssid }} on lähettänyt {{ $value }} Deauth-kehystä""
+
+      - alert: WifiHighInterference
+        expr: wifi_interference_penalty > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ""Korkea Wi-Fi-häiriö kanavalla""
+          description: ""AP {{ $labels.ssid }} kanavalla {{ $labels.channel }}: häiriö {{ $value }}""
+
+      - alert: WifiWeakSignal
+        expr: wifi_rssi_dbm < -80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: ""Heikko Wi-Fi-signaali""
+          description: ""{{ $labels.ssid }}: RSSI {{ $value }} dBm""
+
+      - alert: WifiOpenNetwork
+        expr: wifi_security_open == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: ""Avoin Wi-Fi-verkko havaittu""
+          description: ""{{ $labels.ssid }} ({{ $labels.bssid }}) on suojaamaton""
+
+      - alert: WifiHighChannelLoad
+        expr: wifi_channel_utilization_pct > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ""Wi-Fi-kanavakuorma korkea""
+          description: ""{{ $labels.bssid }}: kanavan käyttöaste {{ $value }} %""
+
+      - alert: WifiEvilTwin
+        expr: wifi_evil_twin_detected == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: ""Evil Twin -tukiasema havaittu""
+          description: ""SSID {{ $labels.ssid }}: väärennetty AP {{ $labels.bssid }}""
+
+      - alert: WifiThreatIntelHit
+        expr: wifi_threat_intel_hits_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: ""Uhkatiedustelu: haitallinen domain havaittu""
+          description: ""{{ $value }} osumaa uhkatietokannassa viimeisen skannauksen aikana""
+";
+            WriteFileSafe(Path.Combine(dir, "alert_rules.yml"), yaml);
+            AppLogger.Log("[Prometheus] alert_rules.yml kirjoitettu");
+        }
+
+        // ── Grafana dashboard JSON ─────────────────────────────────
+
+        private void ExportGrafanaDashboard(string dir)
+        {
+            // Grafana 10+ yhteensopiva dashboard JSON
+            string json = @"{
+  ""__inputs"": [{ ""name"": ""DS_PROMETHEUS"", ""label"": ""Prometheus"",
+                   ""type"": ""datasource"", ""pluginId"": ""prometheus"" }],
+  ""title"": ""WifiAnalyzerPro"",
+  ""uid"":  ""wifianalyzer-main"",
+  ""schemaVersion"": 39,
+  ""refresh"": ""30s"",
+  ""time"": { ""from"": ""now-1h"", ""to"": ""now"" },
+  ""panels"": [
+    { ""id"":1, ""type"":""timeseries"", ""title"":""RSSI per AP (dBm)"",
+      ""gridPos"":{ ""x"":0,""y"":0,""w"":12,""h"":8 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""wifi_rssi_dbm"",""legendFormat"":""{{ssid}} ({{channel}})"" }],
+      ""fieldConfig"":{ ""defaults"":{
+        ""unit"":""dBm"", ""thresholds"":{ ""steps"":[
+          {""color"":""red"",""value"":-100},
+          {""color"":""orange"",""value"":-80},
+          {""color"":""yellow"",""value"":-70},
+          {""color"":""green"",""value"":-60}]}}} },
+    { ""id"":2, ""type"":""timeseries"", ""title"":""Häiriöpisteet per AP"",
+      ""gridPos"":{ ""x"":12,""y"":0,""w"":12,""h"":8 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""wifi_interference_penalty"",""legendFormat"":""{{ssid}}"" }] },
+    { ""id"":3, ""type"":""stat"", ""title"":""Havaitut AP:t"",
+      ""gridPos"":{ ""x"":0,""y"":8,""w"":4,""h"":4 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""count(wifi_rssi_dbm)"" }] },
+    { ""id"":4, ""type"":""stat"", ""title"":""Deauth-kehykset (viim. 5 min)"",
+      ""gridPos"":{ ""x"":4,""y"":8,""w"":4,""h"":4 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""increase(wifi_deauth_count_total[5m])"" }],
+      ""fieldConfig"":{ ""defaults"":{ ""thresholds"":{ ""steps"":[
+        {""color"":""green"",""value"":0},
+        {""color"":""orange"",""value"":5},
+        {""color"":""red"",""value"":20}]}}} },
+    { ""id"":5, ""type"":""stat"", ""title"":""Kanavakuorma % (max)"",
+      ""gridPos"":{ ""x"":8,""y"":8,""w"":4,""h"":4 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""max(wifi_channel_utilization_pct)"" }],
+      ""fieldConfig"":{ ""defaults"":{ ""unit"":""%"",
+        ""thresholds"":{ ""steps"":[
+          {""color"":""green"",""value"":0},
+          {""color"":""orange"",""value"":60},
+          {""color"":""red"",""value"":80}]}}} },
+    { ""id"":6, ""type"":""stat"", ""title"":""TI-uhkia havaittu"",
+      ""gridPos"":{ ""x"":12,""y"":8,""w"":4,""h"":4 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""wifi_threat_intel_hits_total"" }],
+      ""fieldConfig"":{ ""defaults"":{ ""thresholds"":{ ""steps"":[
+        {""color"":""green"",""value"":0},
+        {""color"":""red"",""value"":1}]}}} },
+    { ""id"":7, ""type"":""timeseries"", ""title"":""Ping (ms)"",
+      ""gridPos"":{ ""x"":0,""y"":12,""w"":12,""h"":7 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""wifi_ping_ms"",""legendFormat"":""Ping {{gateway}}"" }],
+      ""fieldConfig"":{ ""defaults"":{ ""unit"":""ms"" }} },
+    { ""id"":8, ""type"":""timeseries"", ""title"":""Kaistanopeus (KB/s)"",
+      ""gridPos"":{ ""x"":12,""y"":12,""w"":12,""h"":7 },
+      ""targets"":[{ ""datasource"":""${DS_PROMETHEUS}"",
+        ""expr"":""wifi_throughput_kbps"",""legendFormat"":""Latausnopeus"" }],
+      ""fieldConfig"":{ ""defaults"":{ ""unit"":""KBs"" }} }
+  ]
+}";
+            WriteFileSafe(Path.Combine(dir, "grafana_dashboard.json"), json);
+            AppLogger.Log("[Grafana] grafana_dashboard.json kirjoitettu");
+        }
 
         private static string HE(string s)
         {

@@ -134,6 +134,7 @@
     <Compile Include="HiddenNodeTracker.cs" />
     <Compile Include="ILogger.cs" />
     <Compile Include="LongTermExporter.cs" />
+    <Compile Include="MeshTopologyTracker.cs" />
     <Compile Include="Models.cs" />
     <Compile Include="OuiDatabase.cs" />
     <Compile Include="PassiveChannelScanner.cs" />

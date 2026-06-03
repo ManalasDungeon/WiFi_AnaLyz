@@ -120,6 +120,48 @@ namespace WifiAnalyzerPro
         public int    ThreatIntelMaxRequestsPerHour { get; set; } = 100;
         /// <summary>Käynnistää uhkatiedustelun. Vaatii vähintään yhden API-avaimen.</summary>
         public bool   EnableThreatIntel            { get; set; } = false;
+
+        // ── Sähköpostihälytykset (SMTP) ──────────────────────────
+        /// <summary>SMTP-palvelimen osoite. Tyhjä = pois käytöstä.</summary>
+        public string SmtpHost                     { get; set; } = "";
+        /// <summary>SMTP-portti (587 = STARTTLS, 465 = SSL, 25 = plain).</summary>
+        public int    SmtpPort                     { get; set; } = 587;
+        /// <summary>SMTP-käyttäjätunnus (tyypillisesti sähköpostiosoite).</summary>
+        public string SmtpUser                     { get; set; } = "";
+        /// <summary>SMTP-salasana tai sovellussalasana.</summary>
+        public string SmtpPassword                 { get; set; } = "";
+        /// <summary>Lähettäjän sähköpostiosoite.</summary>
+        public string SmtpFrom                     { get; set; } = "wifianalyzer@localhost";
+        /// <summary>Vastaanottajan sähköpostiosoite. Pilkulla erotettu lista.</summary>
+        public string SmtpTo                       { get; set; } = "";
+        /// <summary>Minimivakavuus sähköpostihälytykseen (1–3).</summary>
+        public int    SmtpAlertSeverityThreshold   { get; set; } = 3;
+        /// <summary>Käytä SSL/TLS-yhteyttä.</summary>
+        public bool   SmtpUseSsl                   { get; set; } = true;
+
+        // ── PCAP-hakemiston hallinta ──────────────────────────────
+        /// <summary>Hakemiston maksimikoko megatavuina ennen vanhojen tiedostojen poistoa. 0 = ei rajaa.</summary>
+        public int    CaptureMaxDirectorySizeMb     { get; set; } = 500;
+        /// <summary>Vanhentuneiden PCAP-tiedostojen säilytysaika päivinä. 0 = ei ikärajaa.</summary>
+        public int    CaptureRetentionDays          { get; set; } = 30;
+
+        // ── Automaattinen compliance-raportti ────────────────────
+        /// <summary>Viikonpäivä automaattiselle compliance-raportille (0=Sun, 1=Mon...). -1 = pois käytöstä.</summary>
+        public int    ComplianceScheduleDay         { get; set; } = -1;
+        /// <summary>Tunti (0–23) jolloin automaattinen compliance-raportti generoidaan.</summary>
+        public int    ComplianceScheduleHour        { get; set; } = 8;
+
+        // ── Kanavasuositus ────────────────────────────────────────
+        /// <summary>Häiriöpisteraja jonka ylittyessä kanavasuositus lähetetään.</summary>
+        public double ChannelRecommendationThreshold { get; set; } = 15.0;
+        /// <summary>Lähetä kanavasuositus myös webhookilla.</summary>
+        public bool   ChannelRecommendationWebhook  { get; set; } = true;
+
+        // ── Captive portal -tunnistus ─────────────────────────────
+        /// <summary>Tunnista captive portal -verkot (DNS-kaappaus). true = aktiivinen.</summary>
+        public bool   DetectCaptivePortal           { get; set; } = true;
+        /// <summary>Kuinka monta % DNS-kyselyistä samaan IP:hen ennen tunnistusta.</summary>
+        public int    CaptivePortalDnsThresholdPct  { get; set; } = 80;
     }
 
     public enum ScanOutcome { None, Running, Ok, Cancelled, Error }

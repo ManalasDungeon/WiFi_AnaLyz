@@ -16,7 +16,7 @@ namespace WifiAnalyzerPro
         private static readonly JsonSerializerOptions JsonRead =
             new() { PropertyNameCaseInsensitive = true };
 
-        private readonly WifiConfig     _cfg;
+        private WifiConfig              _cfg;
         private readonly AlertManager   _alerts;
         private readonly ChannelAnalyzer _channels;
         private readonly OuiDatabase    _oui;
@@ -47,6 +47,14 @@ namespace WifiAnalyzerPro
         private readonly ThreatIntelClient      _threatIntel;
         private readonly WifiHoneypot           _honeypot;
         private readonly EapolTracker           _eapolTracker = new();
+        private readonly MeshTopologyTracker    _mesh         = new();
+
+        // Kanavasuositus — lähetetään enintään kerran 30 min
+        private DateTime _lastChannelRecommendationAt = DateTime.MinValue;
+        // Scheduled compliance — seurataan milloin viimeksi generoidaan
+        private DateTime _lastComplianceReportAt = DateTime.MinValue;
+        // PCAP-siivous — kerran tunnissa
+        private DateTime _lastPcapCleanupAt = DateTime.MinValue;
 
         /// <summary>
         /// Laukaistaan kun uusi DPI-havainto (DNS/SNI) on tallennettu.
@@ -177,6 +185,9 @@ namespace WifiAnalyzerPro
                         _alertDispatcher?.SendAsync("ThreatIntel", obs.Name, detail, sev);
                         if (sev == 3 && !string.IsNullOrEmpty(obs.SourceMac))
                             _routerContainment?.BlockMac(obs.SourceMac, $"ThreatIntel: {obs.Name}");
+                        // Tallenna osuma dashboardin TI-paneelille
+                        _tiHits.Enqueue((obs.Name, tiResult.Level.ToString(), tiResult.Source, DateTime.Now));
+                        while (_tiHits.Count > 50) _tiHits.TryDequeue(out _);
                         AppLogger.Log($"[TI] Hälytys: {obs.Name} ({tiResult.Level}) via {obs.SourceMac}");
                     });
             };
@@ -384,6 +395,19 @@ namespace WifiAnalyzerPro
         {
             if (scanner == null) return;
 
+            // Captive portal: välitä kynnysarvo konfiguraatiosta
+            _hiddenNodeTracker.CaptivePortalThresholdPct = _cfg.CaptivePortalDnsThresholdPct;
+
+            // Captive portal -hälytys
+            _hiddenNodeTracker.CaptivePortalDetected += (bssid, dominantTarget) =>
+            {
+                string msg = $"Captive portal havaittu: BSSID {bssid}, " +
+                             $"kaikki DNS → {dominantTarget}";
+                _alerts.Add("CaptivePortal", bssid, msg);
+                _alertDispatcher?.SendAsync("CaptivePortal", bssid, msg, 2);
+                AppLogger.Log($"[CaptivePortal] {msg}");
+            };
+
             scanner.DeauthReceived += evt =>
             {
                 _deauthTracker.Record(evt);
@@ -461,6 +485,7 @@ namespace WifiAnalyzerPro
         public string EapolStatus => _eapolTracker.Status;
         public ThreatIntelClient    GetThreatIntelClient() => _threatIntel;
         public string               ThreatIntelStatus     => _threatIntel?.Status ?? "";
+        public MeshTopologyTracker  GetMeshTracker()      => _mesh;
         public string ExportComplianceReport(ComplianceReport r)
             => _exporter.ExportComplianceReport(r, _cfg.SaveDirectory ?? ".");
         public List<string>         GetRouterBlockLog()  => _routerContainment?.GetBlockLog() ?? new System.Collections.Generic.List<string>();
@@ -801,6 +826,12 @@ namespace WifiAnalyzerPro
                 string bssid = kv.Key;
                 var    snap  = kv.Value;
                 long   bytes = _trafficByBssid.TryGetValue(bssid, out var b) ? b : 0;
+
+                // KORJAUS 1: Syötä liikennebytejä BehaviorProfilerille.
+                // Ilman tätä HourlyBytes[h] pysyy aina nollana → TRAFFIC_SPIKE ja
+                // DATA_EXFIL -säännöt eivät voi koskaan laueta.
+                if (bytes > 0)
+                    _behavior?.RecordTraffic(bssid, _oui.Lookup(bssid) ?? "", bytes);
                 double base_ = (100 + snap.Rssi) + (Math.Log10(bytes + 1) * 5.0);
                 int    ch    = snap.Channel;
 
@@ -841,6 +872,7 @@ namespace WifiAnalyzerPro
                     Score = score,
                     Grade = ChannelAnalyzer.RssiToGrade(snap.Rssi),
                     ChannelUtilization = _channelLoad.GetUtilization(bssid),
+                    StationCount       = _channelLoad.GetStationCount(bssid),
                     // ── Kyvykkyystiedot passiivisesta skannauksesta ──
                     PhyGeneration   = passiveInfo?.PhyGeneration,
                     MaxDataRateMbps = passiveInfo?.MaxDataRateMbps,
@@ -899,6 +931,28 @@ namespace WifiAnalyzerPro
             _channels.UpdateHourlyInterference(snap);
             CheckRoamSuggestion(snap);
 
+            // Mesh-topologia päivitetään joka kierroksella
+            _mesh.Update(snap, ConnectedBssidSafe, _oui);
+
+            // Kanavasuositus kun häiriö ylittää kynnyksen (max 1 krt / 30 min)
+            if ((DateTime.Now - _lastChannelRecommendationAt).TotalMinutes >= 30)
+                CheckChannelRecommendation(snap);
+
+            // Aikataulutettu compliance-raportti (viikonpäivä + tunti)
+            if (_cfg.ComplianceScheduleDay >= 0)
+                CheckScheduledCompliance(snap);
+
+            // PCAP-hakemiston siivous (kerran tunnissa)
+            if ((DateTime.Now - _lastPcapCleanupAt).TotalHours >= 1)
+            {
+                _lastPcapCleanupAt = DateTime.Now;
+                if (_cfg.EnableAutoCapture)
+                    PcapRecorder.CleanupDirectory(
+                        _cfg.CaptureDirectory,
+                        _cfg.CaptureRetentionDays,
+                        _cfg.CaptureMaxDirectorySizeMb);
+            }
+
             // Behavioral IDS: tarkista anomaliat kerran minuutissa
             if ((DateTime.Now - _lastBehaviorCheck).TotalMinutes >= 1)
             {
@@ -922,6 +976,70 @@ namespace WifiAnalyzerPro
                     AnomalyDetected?.Invoke(a);
                 }
             }
+        }
+
+        private void CheckChannelRecommendation(List<AnalyzedAccessPoint> snap)
+        {
+            var connAp = snap.FirstOrDefault(a => a.IsConnected);
+            if (connAp == null) return;
+
+            // Laske häiriö nykyisellä kanavalla
+            if (connAp.InterferencePenalty < _cfg.ChannelRecommendationThreshold) return;
+
+            // Etsi paras vaihtoehtokanava (2.4 GHz: 1, 6, 11)
+            int[] candidates2G = { 1, 6, 11 };
+            int[] candidates5G = { 36, 40, 44, 48, 149, 153, 157, 161 };
+            var candidates = connAp.Band == "2.4 GHz" ? candidates2G : candidates5G;
+
+            var countByChannel = snap.GroupBy(a => a.Channel)
+                                     .ToDictionary(g => g.Key, g => g.Count());
+            int bestCh    = connAp.Channel;
+            int bestCount = int.MaxValue;
+
+            foreach (int ch in candidates)
+            {
+                if (ch == connAp.Channel) continue;
+                countByChannel.TryGetValue(ch, out int cnt);
+                if (cnt < bestCount) { bestCount = cnt; bestCh = ch; }
+            }
+
+            if (bestCh == connAp.Channel) return;
+
+            _lastChannelRecommendationAt = DateTime.Now;
+            string msg = $"Kanavasuositus: vaihda kanavalta {connAp.Channel} kanavalle {bestCh} " +
+                         $"— häiriö {connAp.InterferencePenalty:F1} → arv. {bestCount * _cfg.CoChannelPenaltyWeight:F1} " +
+                         $"('{connAp.Ssid}', {connAp.Band})";
+
+            AppLogger.Log($"[Channel] {msg}");
+            _alerts.Add("ChannelRecommendation", connAp.Bssid, msg);
+
+            if (_cfg.ChannelRecommendationWebhook)
+                _alertDispatcher?.SendAsync("Kanavasuositus", connAp.Ssid, msg, 1);
+        }
+
+        private void CheckScheduledCompliance(List<AnalyzedAccessPoint> snap)
+        {
+            var now = DateTime.Now;
+            // Laukaise vain oikeana viikonpäivänä + tunnin ikkunassa
+            if ((int)now.DayOfWeek != _cfg.ComplianceScheduleDay) return;
+            if (now.Hour != _cfg.ComplianceScheduleHour) return;
+            // Vain kerran päivässä
+            if ((now - _lastComplianceReportAt).TotalHours < 23) return;
+
+            _lastComplianceReportAt = now;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    var report = ComplianceChecker.Check(snap, _alerts.GetAll(), _eapolTracker.GetSummary());
+                    string path = _exporter.ExportComplianceReport(report, _cfg.SaveDirectory ?? ".");
+                    string summary = $"Automaattinen compliance-raportti: {report.OverallGrade} ({report.Score}/100) — {path}";
+                    AppLogger.Log($"[Compliance] {summary}");
+                    _alertDispatcher?.SendAsync("Compliance-raportti",
+                        $"Arvosana {report.OverallGrade}", summary, 1);
+                }
+                catch (Exception ex) { AppLogger.Log($"[Compliance] Automaattinen: {ex.Message}"); }
+            });
         }
 
         private void CheckRoamSuggestion(List<AnalyzedAccessPoint> snap)
@@ -1100,11 +1218,26 @@ namespace WifiAnalyzerPro
                 RouterBlockLog    = (_routerContainment?.GetBlockLog() ?? new System.Collections.Generic.List<string>())
                                      .AsEnumerable().Reverse().Take(20).ToList(),
                 EapolSummary      = _eapolTracker.GetSummary(),
-                HoneypotEvents    = _honeypot?.GetRecentEvents(20) ?? new System.Collections.Generic.List<HoneypotEvent>()
+                HoneypotEvents    = _honeypot?.GetRecentEvents(20) ?? new System.Collections.Generic.List<HoneypotEvent>(),
+                ThreatIntelStatus = _threatIntel?.Status ?? "TI: pois käytöstä",
+                ThreatIntelHits   = GetRecentThreatIntelHits(),
+                MeshGroups        = _mesh.GetMeshGroups(),
+                RecentRoaming     = _mesh.GetRecentRoaming(15),
+                CaptivePortals    = _hiddenNodeTracker.GetCaptivePortals(),
             };
         }
 
         /// <summary>Listaa viimeisimmät PCAP-tiedostot tallennushakemistosta.</summary>
+        // TI-löydösten ring-queue dashboardille (max 50 viimeisintä)
+        private readonly System.Collections.Concurrent.ConcurrentQueue<(string Domain, string Level, string Source, DateTime Time)>
+            _tiHits = new();
+
+        private List<(string Domain, string Level, string Source, DateTime Time)> GetRecentThreatIntelHits()
+        {
+            var arr = _tiHits.ToArray();
+            return arr.Skip(Math.Max(0, arr.Length - 20)).ToList();
+        }
+
         private List<string> GetRecentPcapFiles(int max)
         {
             try
@@ -1245,6 +1378,14 @@ namespace WifiAnalyzerPro
         public void ApplyConfig(WifiConfig newCfg)
         {
             if (newCfg == null) return;
+
+            // KORJAUS 1: päivitä _cfg itse (ei enää readonly) jotta kaikki uudet kentät
+            // (ComplianceScheduleDay, CaptureRetentionDays, ChannelRecommendationThreshold jne.)
+            // saadaan hot-reloadin kautta ilman erillistä volatile-kenttää per arvo.
+            // Kirjoitetaan vain ApplyConfig:ssa (HotReload-säikeestä), luetaan päälangasta
+            // → WifiConfig on ei-mutatoitava arvo-olio → ei tarvita lukkoa.
+            _cfg = newCfg;
+
             _minScanInterval   = TimeSpan.FromSeconds(newCfg.MinScanIntervalSeconds);
             _bssStaleThreshold = TimeSpan.FromSeconds(newCfg.BssStaleThresholdSeconds);
             _staleApTtl        = TimeSpan.FromMinutes(newCfg.StaleApMinutes);
@@ -1255,10 +1396,16 @@ namespace WifiAnalyzerPro
             _alertDispatcher?.Apply(newCfg);
             _routerContainment?.Apply(newCfg);
             _threatIntel?.Apply(newCfg);
+
+            // KORJAUS 2: CaptivePortalThresholdPct päivitetään hot-reloadin yhteydessä
+            _hiddenNodeTracker.CaptivePortalThresholdPct = newCfg.CaptivePortalDnsThresholdPct;
+
             AppLogger.Log($"[HotReload] RssiAlert={newCfg.RssiAlertThreshold} dBm, " +
                           $"ScanInterval={newCfg.MinScanIntervalSeconds} s, " +
+                          $"Compliance={newCfg.ComplianceScheduleDay}, " +
+                          $"ChannelRec={newCfg.ChannelRecommendationThreshold:F0}, " +
                           $"TI={(newCfg.EnableThreatIntel ? "on" : "off")}, " +
-                          $"Discord={(string.IsNullOrEmpty(newCfg.DiscordWebhookUrl) ? "off" : "on")}");
+                          $"SMTP={(string.IsNullOrEmpty(newCfg.SmtpHost) ? "off" : "on")}");
         }
         public void RequestStop() { try { _cts.Cancel(); } catch (Exception ex) { AppLogger.Log($"[Engine] ReqStop: {ex.Message}"); } }
 
